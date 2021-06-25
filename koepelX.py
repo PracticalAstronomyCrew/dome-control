@@ -6,7 +6,7 @@ from validate import Validator
 currentPos = 0.0                  # Starting position
 domeBusy = False                # Boolean for movement of dome
 configfile = 'config.ini'       # Config file
-configspecfile = 'configspec.ini' # Config file specification
+configspecfile = 'resources/configspec.ini' # Config file specification
 calibrating = False             # Indicator if the current state is 'calibrating'
 
 # Read and write functions are defined here

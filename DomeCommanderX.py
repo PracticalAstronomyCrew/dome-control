@@ -15,7 +15,9 @@ import numpy as np
 import pandas as pd 
 
 # Blaauw Observatory location
-OBSERV_LOC = EarthLocation(lat=53.240243*u.deg, lon=6.53651*u.deg)
+LAT = 53.240243
+LON = 6.53651
+OBSERV_LOC = EarthLocation(lat=LAT*u.deg, lon=LON*u.deg)
 
 # Connect to the telescope / TheSkyXInformation (for the target position) / CCD (for exposure status) 
 sys.coinit_flags = 0
@@ -62,6 +64,92 @@ def is_dome_busy():
     busy = int((res.split('\n'))[0])
 
     return busy
+
+# --------------------- #
+#  Transformation stuff #
+# --------------------- #
+
+def vec4(x, y, z):
+    """
+    Return a 4-element vector, appropriate 
+    for coordinate transformations.
+    """
+    return np.array([x, y, z, 1]) #np.array([x, y, z, 1]).reshape((4,1))
+
+def vec3(v4):
+    """
+    Convert a 4-element vector to a 3-element vector.
+    """
+    v3 = v4[:3].reshape(3)
+
+    return v3
+
+def transform(x, y, z):
+    """Transform a vector (x', y', z', 1)."""
+    return np.array([
+        [1, 0, 0, x],
+        [0, 1, 0, y],
+        [0, 0, 1, z],
+        [0, 0, 0, 1],
+    ])
+
+def rot_x(angle):
+    """
+    Rotate a vector (x, y, z, 1) about the x-axis 
+    in a right-handed coordinate system.
+    """
+    angle = np.radians(angle)
+
+    return np.array([
+        [1,             0,              0, 0],
+        [0, np.cos(angle), -np.sin(angle), 0],
+        [0, np.sin(angle),  np.cos(angle), 0],
+        [0,             0,              0, 1],
+    ])
+
+def rot_y(angle):
+    """
+    Rotate a vector (x, y, z, 1) about the y-axis 
+    in a right-handed coordinate system.
+    """
+    angle = np.radians(angle)
+
+    return np.array([
+        [np.cos(angle),  0,  -np.sin(angle), 0],
+        [0,              1,               0, 0],
+        [-np.sin(angle), 0,   np.cos(angle), 0],
+        [0,              0,               0, 1],
+    ])
+
+def rot_z(angle):
+    """
+    Rotate a vector (x, y, z, 1) about the z-axis 
+    in a right-handed coordinate system.
+    """
+    angle = np.radians(angle)
+
+    return np.array([
+        [np.cos(angle),  -np.sin(angle), 0, 0],
+        [np.sin(angle),  np.cos(angle), 0, 0],
+        [0, 0, 1, 0],
+        [0, 0, 0, 1],
+    ])
+
+def get_telescope_position(ha, dec):
+    H_01 = transform(0, 0, 0.26)
+    H_12 = rot_x(90-LAT) @ rot_z(-ha) @ transform(0, 0, 0.35)
+    H_23 = rot_x(dec) @ transform(-0.14, 0, 0)
+
+    H = H_01 @ H_12 @ H_23
+
+    H_unit = transform(0, 1, 0)
+
+    H_diff = H @ H_unit - H
+
+    ap_pos = H @ vec4(0, 0, 0)
+    direction = H_diff @ vec4(0, 0, 0)
+
+    return vec3(ap_pos), vec3(direction)
 
 def polar_to_cart(radius, theta):
     """
@@ -350,7 +438,10 @@ class MainWindow(QtWidgets.QMainWindow):
         update_timer.start(200)
 
     def plot_dome(self, dome_pos, scope_pos):
-        """Plot a polar graph w/ the telescope & dome."""
+        """
+        Plot a polar graph w/ the telescope & dome, given the 
+        dome position (azimuth) and telescope position (ha, dec).
+        """
         self.domeRadar.clear()
 
         self.domeRadar.hideAxis('left')
@@ -407,15 +498,15 @@ class MainWindow(QtWidgets.QMainWindow):
         dome_az = np.arange(np.radians(dome_pos - slit_size/2), np.radians(dome_pos + slit_size/2), 0.01)
         dome_radius = np.ones(dome_az.size)
 
-        # scope_r = np.arange(0, 1.1, 0.1)
-        # scope_az = np.radians(scope_pos) * np.ones(scope_r.size)
-
         # Transform to cartesian and plot
         dome_coords = polar_to_cart(dome_radius, dome_az)
-        # scope_coords = polar_to_cart(scope_r, scope_az)
 
         self.domeRadar.plot(*dome_coords, pen=pg.mkPen(width=5))
-        # self.domeRadar.plot(*scope_coords, pen=pg.mkPen(color='r', width=5))
+
+        aperture, direction = get_telescope_position(scope_pos[0] * 15, scope_pos[1])
+
+        scope_coords = np.array([aperture[:2], 1.2*direction[:2]])
+        self.domeRadar.plot(*scope_coords, pen=pg.mkPen(color='r', width=3))
     
     def _init_routine(self):
         """To run when the GUI starts."""
@@ -451,10 +542,6 @@ class MainWindow(QtWidgets.QMainWindow):
         """
         dome_az = get_dome_pos()
 
-        # Update the plot
-        # self.plot(justify(dome_az), justify(scope_az))
-        self.plot_dome(justify(dome_az), 0) # TODO: include proper scope position
-
         telescope.GetAzAlt()   
         scope_az  = telescope.dAz
         scope_alt = telescope.dAlt
@@ -483,10 +570,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.decIndicator.setProperty('text', dec_fmt)
 
         observing_time = Time(datetime.now(), scale='utc', location=OBSERV_LOC)
-        lst = observing_time.sidereal_time('mean')
+        lst = observing_time.sidereal_time('mean').hour
         
-        self.lstIndicator.setProperty('text', '{:.2f} h'.format(lst.hour))
-        self.haIndicator.setProperty('text', '{:.2f} h'.format(lst.hour - scope_ra))
+        scope_ha = lst - scope_ra
+        self.lstIndicator.setProperty('text', '{:.2f} h'.format(lst))
+        self.haIndicator.setProperty('text', '{:.2f} h'.format(scope_ha))
+
+        # Update the plot
+        self.plot_dome(justify(dome_az), (scope_ha, scope_dec))
 
         # Update CCD info (useful for displaying when the dome should not move!)
         ccd_status = ccd.ExposureStatus # TODO: use status to now move the dome when the CCD is exposed or reading out

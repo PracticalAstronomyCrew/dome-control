@@ -5,7 +5,7 @@ from validate import Validator
 # Used globals
 currentPos = 0.0                  # Starting position
 domeBusy = False                # Boolean for movement of dome
-configfile = 'config.ini'       # Config file
+configfile = 'resources/config.ini'       # Config file
 configspecfile = 'resources/configspec.ini' # Config file specification
 calibrating = False             # Indicator if the current state is 'calibrating'
 

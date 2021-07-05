@@ -1,10 +1,8 @@
 import sys, enum, time, win32com.client, pythoncom
 
-from socket import socket, AF_INET, SOCK_STREAM
 from PyQt5 import QtWidgets, uic
 from PyQt5.QtCore import QThread, pyqtSignal
 from PyQt5.QtGui import QFont
-from pyqtgraph import TextItem
 from astropy import units as u
 from astropy.time import Time
 from astropy.coordinates import EarthLocation, SkyCoord, Angle
@@ -14,179 +12,36 @@ import pyqtgraph as pg
 import numpy as np
 import pandas as pd
 
-import time
+from DomeCommanderX_Helpers import (
+    LAT, 
+    LON, 
+    send_command, 
+    get_dome_pos, 
+    is_dome_busy,
+    format_koepel_response, 
+    rot_z,
+    get_telescope_position, 
+    altitude,
+    justify, 
+    polar_to_cart
+)
 
 
-# Blaauw Observatory location
-LAT = 53.240243
-LON = 6.53651
 OBSERV_LOC = EarthLocation(lat=LAT*u.deg, lon=LON*u.deg)
 
 
-def send_command(command):
-    """Send a command to KoepelX"""
-    HOST = 'Hercules'
-    PORT = 65000
-    BUFSIZ = 1024
-    ADDR = (HOST, PORT)
-
-    tcpCliSock = socket(AF_INET, SOCK_STREAM)
-    tcpCliSock.connect(ADDR)
-
-    tcpCliSock.send(command.encode('utf-8'))
-    response = tcpCliSock.recv(BUFSIZ)
-    tcpCliSock.close()
-
-    return response
-
-
-def get_dome_pos():
-    """Get the dome position (azimuth)"""
-    pos = send_command('POSITION')
-    angle = float((pos.split(b'\n'))[0])
-    
-    if angle < 0.: angle = angle + 360.
-    if angle > 360.: angle = angle % 360.
-
-    return angle
-
-
-def format_koepel_response(res):
+class TrackingState(enum.Enum):
     """
-    Properly retrieve & decode the response 
-    messages from KoepelX.
+    Enum signifying which (combination) of 
+    aperture(s) is being tracked.
     """
-    return (res.split(b'\n'))[1].decode("utf-8")
+    TELESCOPE = 1
+    TELESCOPE_GUIDER = 2
+    FINDER = 3
 
-
-def is_dome_busy():
-    """Return whether the dome is busy (moving)"""
-    res = send_command('DOMEBUSY')
-    busy = int((res.split(b'\n'))[0])
-
-    return busy
-
-
-# --------------------- #
-#  Transformation stuff #
-# --------------------- #
-
-
-def vec4(x, y, z):
-    """
-    Return a 4-element vector, appropriate 
-    for coordinate transformations.
-    """
-    return np.array([x, y, z, 1]) 
-
-
-def vec3(v4):
-    """
-    Convert a 4-element vector to a 3-element vector.
-    """
-    v3 = v4[:3].reshape(3)
-
-    return v3
-
-
-def transform(x, y, z):
-    """Transform a vector (x', y', z', 1)."""
-    return np.array([
-        [1, 0, 0, x],
-        [0, 1, 0, y],
-        [0, 0, 1, z],
-        [0, 0, 0, 1],
-    ])
-
-
-def rot_x(angle):
-    """
-    Rotate a vector (x, y, z, 1) about the x-axis 
-    in a right-handed coordinate system.
-    """
-    angle = np.radians(angle)
-
-    return np.array([
-        [1,             0,              0, 0],
-        [0, np.cos(angle), -np.sin(angle), 0],
-        [0, np.sin(angle),  np.cos(angle), 0],
-        [0,             0,              0, 1],
-    ])
-
-
-def rot_y(angle):
-    """
-    Rotate a vector (x, y, z, 1) about the y-axis 
-    in a right-handed coordinate system.
-    """
-    angle = np.radians(angle)
-
-    return np.array([
-        [np.cos(angle),  0,  -np.sin(angle), 0],
-        [0,              1,               0, 0],
-        [-np.sin(angle), 0,   np.cos(angle), 0],
-        [0,              0,               0, 1],
-    ])
-
-
-def rot_z(angle):
-    """
-    Rotate a vector (x, y, z, 1) about the z-axis 
-    in a right-handed coordinate system.
-    """
-    angle = np.radians(angle)
-
-    return np.array([
-        [np.cos(angle),  -np.sin(angle), 0, 0],
-        [np.sin(angle),  np.cos(angle), 0, 0],
-        [0, 0, 1, 0],
-        [0, 0, 0, 1],
-    ])
-
-
-def get_telescope_position(ha, dec):
-    H_01 = transform(0, 0, 0.26)
-    H_12 = rot_x(90-LAT) @ rot_z(-ha) @ transform(0, 0, 0.35)
-    H_23 = rot_x(dec) @ transform(-0.14, 0, 0)
-
-    H = H_01 @ H_12 @ H_23 @ rot_z(270) # TODO: maybe change the 270 once more?
-
-    H_unit = transform(0, 1, 0)
-
-    H_diff = H @ H_unit - H
-
-    ap_pos = H @ vec4(0, 0, 0)
-    direction = H_diff @ vec4(0, 0, 0)
-
-    return vec3(ap_pos), vec3(direction)
-
-
-def polar_to_cart(radius, theta):
-    """
-    Convert polar to cartesian coordinates,
-    since Qt can't draw polar graphs :(
-    """
-    x = radius * np.cos(theta)
-    y = radius * np.sin(theta)
-
-    return x, y
-
-
-def justify(pos):
-    """
-    Adjust the polar graph, s.t. 0 deg is north, 
-    90 deg is east, 180 south, and 270 west.
-    """
-    pos = 360 - pos
-    pos += 90
-
-    if pos >= 360:
-        pos %= 360
-
-    if pos < 0:
-        pos += 360
-
-    return (pos + 180) % 360
+    @classmethod
+    def default(obj):
+        return obj.TELESCOPE
 
 
 class InitThread(QThread):
@@ -240,31 +95,30 @@ class ParkThread(QThread):
             time.sleep(1)
 
 
-class TrackingState(enum.Enum):
-    """
-    Enum signifying which (combination) of 
-    aperture(s) is being tracked.
-    """
-    TELESCOPE = 1
-    TELESCOPE_GUIDER = 2
-    FINDER = 3
-
-    @classmethod
-    def default(obj):
-        return obj.TELESCOPE
-
-
 class TrackingThread(QThread):
     """
     Control thread, for the dome tracking the telescope.
+
+    Public methods
+    --------------
+
+    stop_tracking: gracefully exit the thread
     """
     azimuth_error = pyqtSignal()
     exceeding_limits = pyqtSignal()
     update_dome_position = pyqtSignal(float, float)
     aperture_changed = pyqtSignal(TrackingState)
     telescope_data_changed = pyqtSignal(dict)
+    update_ha_dist = pyqtSignal(float)
 
-    def __init__(self):
+    def __init__(self, state=TrackingState.TELESCOPE):
+        """
+        Initialise the tracking thread.
+
+        Parameters
+        ----------
+        state (TrackingState): aperture to track
+        """
         super().__init__()
 
         self.telescope_data = None
@@ -279,7 +133,9 @@ class TrackingThread(QThread):
         self.is_exceeding_limits = False
 
         self.azimuth_data = None # DataFrame w/ ha, dec, az, delta_ha
-        self.tracking_state = TrackingState.default()
+        self.tracking_state = state
+
+        self.set_azimuth_data(state)
 
         self.aperture_changed.connect(self.on_aperture_changed)
         self.telescope_data_changed.connect(self.on_telescope_data_changed)
@@ -288,18 +144,14 @@ class TrackingThread(QThread):
         self.wait()
     
     def stop_tracking(self):
-        """Exit the tracking (loop)"""
+        """Exit the tracking loop."""
         self.is_tracking = False
 
-    def setup(self, state=TrackingState.TELESCOPE):
-        """Determine the object to track"""
-        self.tracking_state = state
-        self.set_azimuth_data(state)
-
     def run(self):
+        """Track the selected aperture and checks whenever the dome should move, every 5 seconds."""
         while self.is_tracking:
             if self.telescope_data is not None:                
-                if self.is_exceeding_limits or self.dome_az is None:
+                if (self.is_exceeding_limits or self.dome_az is None) and not self.telescope_data['is_slewing']:
 
                     ha, dec = self._get_ha_dec()
                     az_new, ha_limit_new = None, None
@@ -311,27 +163,31 @@ class TrackingThread(QThread):
                 
                     is_ccd_inactive = True # TODO: communicate w/ main thread and only move when the CCD is not doing stuff!
                     if az_new is not None and is_ccd_inactive:
-                        self.ha_0 = np.rint(ha*15)
-                        self.dec_0 = np.rint(dec)
+                        self.ha_0 = ha*15
+                        self.dec_0 = dec
                         self.ha_limit = ha_limit_new
                         self.dome_az = (az_new + 180) % 360
 
+                        print('moving @ HA', ha, '& Dec', dec)
+                           
                         self.is_exceeding_limits = False
                     
                         #print('Running goto?!')
+                        msg = send_command('goto ' + str(self.dome_az))
                         self.update_dome_position.emit(self.dome_az, self.ha_limit)
-                        send_command('goto ' + str(self.dome_az))
                 
                 # Check for any changes in the telescope orientation or object tracking
                 try:
                     ha_cur, dec_cur = self._get_ha_dec()
 
-                    ha_diff = np.rint(ha_cur - self.ha_0)*15 # Distance in HA (deg) since moving to the current azimuth
+                    ha_diff = ha_cur*15 - self.ha_0 # Distance in HA (deg) since moving to the current azimuth
+                    #print('limit =', self.ha_limit, 'deg vs. current HA difference =', ha_diff, 'deg', )
+                    self.update_ha_dist.emit((self.ha_limit - ha_diff)/15 * 60)
 
                     if not ha_cur is None and not dec_cur is None and self.dome_az is not None:
 
-                        has_exceeded_ha_limit = ha_diff >= self.ha_limit and ha_diff > 0 # TODO: hope the 2nd 'and' fixes things...
-                        is_dec_different = not np.isclose(self.dec_0, np.rint(dec_cur))
+                        has_exceeded_ha_limit = ha_diff > self.ha_limit and ha_diff > 0 # TODO: hope the 2nd 'and' fixes things...
+                        is_dec_different = not np.isclose(np.rint(self.dec_0), np.rint(dec_cur))
 
                         # Signal run(...) that the dome should got to a different azimuth! 
                         if not self.is_exceeding_limits and (has_exceeded_ha_limit or is_dec_different):
@@ -343,38 +199,36 @@ class TrackingThread(QThread):
                 time.sleep(5) # TODO: larger time step? or remove? idk why I even added it anymore...
 
         print('finished tracking')
-
-    # def tracking_status_watcher(self):
-    #     """Check continuously whether the dome should move to a different position"""
-    #     print('checking tracking status...')
-    #     try:
-    #         ha_cur, dec_cur = self._get_ha_dec()
-
-    #         ha_diff = np.rint(ha_cur - self.ha_0)*15 # Distance in HA (deg) since moving to the current azimuth
-
-    #         if not ha_cur is None and not dec_cur is None and self.dome_az is not None:
-    #             #print('the HA limit is', self.ha_limit)
-
-    #             has_exceeded_ha_limit = ha_diff >= self.ha_limit and ha_diff > 0 # TODO: hope the 2nd 'and' fixes things...
-    #             is_dec_different = not np.isclose(self.dec_0, np.rint(dec_cur))
-
-    #             # Signal run(...) that the dome should got to a different azimuth! 
-    #             if not self.is_exceeding_limits and (has_exceeded_ha_limit or is_dec_different):
-    #                 self.is_exceeding_limits = True
-    #     except:
-    #         pass
     
     def on_telescope_data_changed(self, data):
+        """
+        Set relevant telescope info.
+
+        Parameters
+        ----------
+        data (dict): dictionary of telescope info (ha, dec, lst, etc...)
+        """
         self.telescope_data = data
-        
-        #print('retrieving data from the queue...', self.telescope_data)
 
     def on_aperture_changed(self, state):
-        """Update the optimal azimuth data set"""
+        """
+        Set the azimuth data when the aperture has been 
+        changed in the dropdown menu.
+
+        Parameters
+        ----------
+        state (TrackingState): aperture to track
+        """
         self.set_azimuth_data(state)
 
     def set_azimuth_data(self, state=TrackingState.TELESCOPE):
-        """Set the data set for the current aperture being tracked"""
+        """
+        Load & set the tracking data set.
+
+        Parameters
+        ----------
+        state (TrackingState): aperture to track
+        """
         col_names = ['ha', 'dec', 'az', 'delta_ha']
 
         if state is TrackingState.TELESCOPE:
@@ -384,28 +238,25 @@ class TrackingThread(QThread):
         elif state is TrackingState.FINDER:
             self.azimuth_data = pd.read_csv('resources/optimal_azimuth_finder.csv', names=col_names)
 
+        # Signal that the limits are exceeded to force run() to update the dome position
         self.exceeding_limits.emit()
         self.is_exceeding_limits = True
     
     def _get_ha_dec(self):
         """
-        Return the hour angle & dec of the current 
-        target object, or that of the mount.
+        Get the HA/Dec of the object currently being tracked by TheSkyX
+        or the current telescope orientation when the former is not available.
+
+        Returns
+        -------
+        ha_cur, dec_cur (float, float): the HA (hours) and Dec (deg)
         """
         ha_cur, dec_cur = None, None
 
-        if self.telescope_data['is_tracking']:
+        try:
             ha_cur, dec_cur = self._get_current_target()
-        else:
+        except:
             ha_cur, dec_cur = self._get_current_orientation()
-
-        # try:
-        #     ha_cur, dec_cur = self._get_current_target()
-        # except:
-        #     pass
-        
-        # if not ha_cur and not dec_cur:
-        #     ha_cur, dec_cur = self._get_current_orientation()
 
         if ha_cur < 0:
             ha_cur += 24
@@ -414,7 +265,13 @@ class TrackingThread(QThread):
 
 
     def _get_current_target(self):
-        """Return current target hour angle/dec"""
+        """
+        Get the HA/Dec of the object currently being tracked by TheSkyX.
+
+        Returns
+        -------
+        target_ha, target_dec (float, float): the HA (hours) and Dec (deg)
+        """
         sys.coinit_flags = 0
         pythoncom.CoInitialize()    
 
@@ -423,28 +280,41 @@ class TrackingThread(QThread):
         tsxo.Property(70)
         target_ha = tsxo.ObjInfoPropOut
 
-        # TODO: remove these 2 lines?
-        # tsxo.Property(54) # wrt current epoch; use 57 for J2000
-        # target_ra = tsxo.ObjInfoPropOut
-
         tsxo.Property(56) # wrt current epoch; use 58 for J2000
         target_dec = tsxo.ObjInfoPropOut
         
         tsxo.CoUninitialize()
 
-        # return target_ra, target_dec
         return target_ha, target_dec
     
     def _get_current_orientation(self):
-        """Return the current hour angle/dec of the mount"""
+        """
+        Get the HA/Dec of the mount.
+
+        Returns
+        -------
+        scope_ha, scope_dec (float, float): the HA (hours) and Dec (deg)
+        """
         scope_ha = self.telescope_data['ha']
         scope_dec = self.telescope_data['dec']
 
         return scope_ha, scope_dec
     
     def _get_dome_azimuth(self, ha, dec):
-        """Retrieve the optimal dome azimuth"""
-        ha, dec = np.rint(ha*15), np.rint(dec)
+        """
+        Select the optimal azimuth from the data file for the selected aperture(s).
+
+        Parameters
+        ----------
+        ha (float): current HA (deg)
+        dec (float): current Dec (deg)
+
+        Returns
+        -------
+        desired_az (float): the optimal dome azimuth (deg)
+        ha_dist (float): the time (in hours) the dome can remain at the 'optimal' position
+        """
+        ha, dec = np.rint(ha*15), np.rint(dec) # round off so that they can be used w/ the grid
 
         az_idx = np.isclose(self.azimuth_data['ha'], ha) & np.isclose(self.azimuth_data['dec'], dec)
 
@@ -454,12 +324,19 @@ class TrackingThread(QThread):
         return desired_az, ha_dist
 
 class DataRetrieverThread(QThread):
-    """Thread keeping track of changed in the widgets"""
+    """Thread keeping track of changes in the telescope/dome status."""
     update_telescope_status = pyqtSignal(dict)
     update_dome_status = pyqtSignal(dict)
     update_dome_radar = pyqtSignal()
 
-    def __init__(self, cooldown):
+    def __init__(self, cooldown=1):
+        """
+        Initialise the data retriever.
+
+        Parameters
+        ----------
+        cooldown (int): the interval (in seconds) on which the telescope/dome data should be updated
+        """
         super().__init__()
 
         self.ui_is_running = True
@@ -470,6 +347,7 @@ class DataRetrieverThread(QThread):
         self.wait()
 
     def run(self):
+        """Update the telescope/dome status periodically"""
         while self.ui_is_running:
             self.retrieve_dome_status()
             self.retrieve_telescope_status()
@@ -479,6 +357,7 @@ class DataRetrieverThread(QThread):
             time.sleep(self.cooldown)
        
     def retrieve_dome_status(self):
+        """Retrieve dome status from KoepelX"""
         dome_az = get_dome_pos()
         is_busy = is_dome_busy()
 
@@ -488,17 +367,25 @@ class DataRetrieverThread(QThread):
         })
 
     def retrieve_telescope_status(self):
+        """Retrieve telescope status from TheSkyX"""
         sys.coinit_flags = 0
         pythoncom.CoInitialize()    
 
-        self.telescope = win32com.client.Dispatch("TheSkyXAdaptor.RASCOMTele")
-        self.telescope.Connect()
+        telescope = win32com.client.Dispatch("TheSkyXAdaptor.RASCOMTele")
+        telescope.Connect() 
         
-        is_tracking = self.telescope.IsTracking
+        # TODO: add support for the CCD exposure status
+        #ccd = win32com.client.Dispatch("CCDSoft2XAdaptor.ccdsoft5Camera")
+        #ccd.Connect()
 
-        self.telescope.GetRaDec()
-        scope_ra  = self.telescope.dRA
-        scope_dec = self.telescope.dDec
+        ccd_status = 'TBD'#ccd.ExposureStatus
+        
+        is_tracking = telescope.IsTracking
+        is_slewing = telescope.IsSlewComplete == 0
+
+        telescope.GetRaDec()
+        scope_ra  = telescope.dRA
+        scope_dec = telescope.dDec
 
         observing_time = Time(datetime.now(), scale='utc', location=OBSERV_LOC)
         lst = observing_time.sidereal_time('mean').hour
@@ -511,17 +398,21 @@ class DataRetrieverThread(QThread):
             'is_tracking': is_tracking,
             'lst': lst,
             'ha': ha,
-            'ccd': 'Error...' #ccd.ExposureStatus
+            'is_slewing': is_slewing,
+            'ccd': ccd_status
         })
 
         pythoncom.CoUninitialize()
 
 class MainWindow(QtWidgets.QMainWindow):
+    """Qt's main window providing control over the GUI."""
     
     aperture_switched = pyqtSignal(TrackingState)
     lst_changed = pyqtSignal(float)
 
     def __init__(self, *args, **kwargs):
+        """
+        Initialise the main window, e.g. setting the listeners for the input (buttons/textboxes)"""
         super(MainWindow, self).__init__(*args, **kwargs)
 
         # Load the UI
@@ -543,13 +434,14 @@ class MainWindow(QtWidgets.QMainWindow):
         
         self.apertureSelector.currentTextChanged.connect(self.on_aperture_changed)
 
-        self.data_worker = DataRetrieverThread()
+        self.data_worker = DataRetrieverThread(cooldown=1)
         self.data_worker.finished.connect(lambda: self._log_message('Somehow the DataRetriever stopped working...'))
         self.data_worker.update_dome_status.connect(self.on_dome_status_changed)
         self.data_worker.update_telescope_status.connect(self.on_telescope_status_changed)
         self.data_worker.update_dome_radar.connect(self.draw_dome_radar)
         self.data_worker.start()
         
+        # Telescope & dome status
         self.telescope_status = dict()
         self.dome_status = dict()
         self.ha_bar_timestamp = 0
@@ -557,7 +449,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def draw_dome_radar(self):
         """
         Plot a polar graph w/ the telescope & dome, given the 
-        dome position (azimuth) and telescope position (ha, dec).
+        dome position and telescope orientation.
         """
         self.domeRadar.clear()
 
@@ -577,22 +469,22 @@ class MainWindow(QtWidgets.QMainWindow):
         nesw_font.setPixelSize(14)
         nesw_font.setBold(True)
 
-        north = TextItem('N', anchor=(0.5, 0.5))
+        north = pg.TextItem('N', anchor=(0.5, 0.5))
         self.domeRadar.addItem(north)
         north.setPos(0, 1.25)
         north.setFont(nesw_font)
 
-        east = TextItem('E', anchor=(0.5, 0.5))
+        east = pg.TextItem('E', anchor=(0.5, 0.5))
         self.domeRadar.addItem(east)
         east.setPos(1.25, 0)
         east.setFont(nesw_font)
         
-        south = TextItem('S', anchor=(0.5, 0.5))
+        south = pg.TextItem('S', anchor=(0.5, 0.5))
         self.domeRadar.addItem(south)
         south.setPos(0, -1.25)
         south.setFont(nesw_font)
         
-        west = TextItem('W', anchor=(0.5, 0.5))
+        west = pg.TextItem('W', anchor=(0.5, 0.5))
         self.domeRadar.addItem(west)
         west.setPos(-1.25, 0)
         west.setFont(nesw_font)
@@ -615,27 +507,65 @@ class MainWindow(QtWidgets.QMainWindow):
             slit_az = np.arange(np.radians(az_corrected - slit_size/2), np.radians(az_corrected + slit_size/2), 0.01)
             dome_radius = np.ones(slit_az.size)
 
-            # Transform to cartesian and plot
-            slit_coords = polar_to_cart(dome_radius, slit_az)
-            self.domeRadar.plot(*slit_coords, pen=pg.mkPen(width=5))
+            # Compute the dome rectangle border
+            dome_border = np.array([[-0.3, -0.26, 0, 1], [0.3, -0.26, 0, 1], [0.3, 1, 0, 1], [-0.3, 1, 0, 1], [-0.3, -0.26, 0, 1]]).T
+            dome_coords = (rot_z(-self.dome_status['az']) @  dome_border).T
+
+            self.domeRadar.plot(dome_coords[:, 0], dome_coords[:, 1], pen=pg.mkPen(width=2))
 
         if self.telescope_status:
             aperture, direction = get_telescope_position(self.telescope_status['ha'] * 15, self.telescope_status['dec'])
+            ap_x = -aperture[0]
+            ap_y = -aperture[1]
+            aperture = np.array([ap_x, ap_y])
+            
+            alt_r = np.cos(altitude(self.telescope_status['ha']*15, self.telescope_status['dec']))
 
-            scope_coords = np.array([[0, 0], aperture[:2], aperture[:2] + 1.4*direction[:2]])
+            scope_coords = np.array([[0, 0], aperture[:2], aperture + alt_r*direction[:2]/np.sqrt(direction[0]**2+direction[1]**2)])
             self.domeRadar.plot(scope_coords[:, 0], scope_coords[:, 1], pen=pg.mkPen(color='r', width=3))
+
+            alt_angles = np.arange(0, 2*np.pi, 0.01)
+            radii = alt_r*np.ones(alt_angles.size)
+
+            # Transform to cartesian and plot
+            alt_x, alt_y = polar_to_cart(radii, alt_angles)
+            offset_x, offset_y = aperture[0], aperture[1]
+
+            alt_x = offset_x + alt_x
+            alt_y = offset_y + alt_y
+
+            self.domeRadar.plot(alt_x, alt_y, pen=pg.mkPen(color='r', width=0.4))
     
     def _init_routine(self):
         """To run when the GUI starts."""
         self._log_message('Starting dome control software...')
+        
+        self.domeRadar.clear()
+
+        self.domeRadar.hideAxis('left')
+        self.domeRadar.hideAxis('bottom')
 
     def _log_message(self, msg):
+        """
+        Add a timestamped status message to the log box.
+
+        Parameters
+        ----------
+        msg (str): the message
+        """
         timestamp = datetime.now().strftime('%H:%M:%S')
         text = '[{}] {}'.format(timestamp, msg)
 
         self.log.append(text)
 
     def _get_tracking_state(self):
+        """
+        Return the tracking state based on the item selected in the aperture dropdown.
+
+        Returns
+        -------
+        target (TrackingState): the (target) aperture; the aperture to track
+        """
         aperture = self.apertureSelector.currentText()
 
         if aperture == 'Telescope':
@@ -651,8 +581,14 @@ class MainWindow(QtWidgets.QMainWindow):
         return target
 
     def on_dome_status_changed(self, status):
-        # Update dome position
-        self.azIndicator.setProperty('text', '{:.1f} deg'.format(status['az']))
+        """
+        Listen to any changes in the dome status and update the UI.
+
+        Parameters
+        ----------
+        status (dict): the dome status (azimuth, whether it's tracking, whether it's moving)
+        """
+        self.azIndicator.setProperty('text', '{:.1f} deg'.format(status['az'])) # Update dome position
 
         # Update tracking status
         is_tracking = False
@@ -671,18 +607,27 @@ class MainWindow(QtWidgets.QMainWindow):
         self.dome_status = status
 
     def on_telescope_status_changed(self, status):
+        """
+        Listen to any changes in the telescope status and update the UI.
+
+        Parameters
+        ----------
+        status (dict): the dome status (ra, ha, dec, lst, ccd status, etc...)
+        """
         scope_coords = SkyCoord(ra=status['ra']*u.hour, dec=status['dec']*u.degree)
 
         ra_fmt, dec_fmt = scope_coords.to_string('hmsdms').split(' ')
         self.raIndicator.setProperty('text', ra_fmt)
         self.decIndicator.setProperty('text', dec_fmt)
         
+        self.ccdIndicator.setProperty('text', status['ccd'])
+
         lst_fmt = Angle(status['lst'], unit='hourangle').hms
-        self.lstIndicator.setProperty('text', '{}h{}m{}s'.format(lst_fmt.h, lst_fmt.m, lst_fmt.s)) # TODO: maybe fix?
+        self.lstIndicator.setProperty('text', '{:02.0f}h{:02.0f}m{:02.0f}s'.format(lst_fmt.h, np.abs(lst_fmt.m), np.abs(lst_fmt.s))) # TODO: maybe fix?
         
         scope_ha = status['lst'] - status['ra']
         ha_fmt = Angle(scope_ha, unit='hourangle').hms
-        self.haIndicator.setProperty('text', '{}h{}m{}s'.format(ha_fmt.h, ha_fmt.m, ha_fmt.s))
+        self.haIndicator.setProperty('text', '{:02.0f}h{:02.0f}m{:02.0f}s'.format(ha_fmt.h, np.abs(ha_fmt.m), np.abs(ha_fmt.s)))
 
         try:
             if self.thread.isRunning() and hasattr(self.thread, 'is_tracking'):
@@ -691,9 +636,6 @@ class MainWindow(QtWidgets.QMainWindow):
             pass
         
         self.telescope_status = status
-
-        delta_t = status['list'] - self.ha_bar_timestamp
-        self.haBar.setValue(int(delta_t * 60))
 
     def init_clicked(self):
         """Initialize & run the dome calibration routine"""
@@ -728,7 +670,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.thread.start()
 
     def track_clicked(self):
-        """Init. telescope tracking using KoepelX"""
+        """
+        Init. telescope tracking using KoepelX and spawn a tracking thread"""
         
         self._log_message('Dome is preparing to track the telescope')
 
@@ -738,32 +681,47 @@ class MainWindow(QtWidgets.QMainWindow):
         except:
             pass
         
-        self.thread = TrackingThread()
+        self.thread = TrackingThread(state=self._get_tracking_state())
         self.thread.azimuth_error.connect(self.on_azimuth_error)
         self.thread.exceeding_limits.connect(self.on_limits_exceeded)
+        self.thread.update_ha_dist.connect(self.update_ha_progress_bar)
         self.thread.update_dome_position.connect(self.on_dome_moving)
-        self.thread.setup(state=self._get_tracking_state())
         self.thread.finished.connect(self.on_tracking_finished)
         self.thread.start()
 
     def on_tracking_finished(self):
+        """Reset the HA progress bar when the tracking has been disengaged"""
         self._log_message('Disengaged telescope tracking!')
         self.haBar.setMaximum(0)
     
     def on_limits_exceeded(self):
+        """
+        Listen to when the limits (HA dist. or when the aperture changes) are
+        exceeded and send a message that the dome will soon move, since the dome 
+        updates/checks its position only every 5 seconds.
+        """
         self._log_message('Dome is looking for a new position... Moving in ~5 seconds!')
 
     def on_dome_moving(self, az, ha_limit):
+        """Update the HA progress bar whenever the dome moves to a new position"""
         self._log_message('Slewing the dome to {:.1f} degrees'.format(az))
-        self.update_ha_progress_bar_limits(ha_limit)
+        
+        self.ha_bar_timestamp = self.telescope_status['lst'] # hours
+        
+        remaining = int(ha_limit/15 * 60) # convert to minutes and round off, cuz the bar doesn't do decimals
+        
+        self.haBar.setMaximum(remaining) 
+        self.haBar.setValue(remaining)
 
-    def update_ha_progress_bar_limits(self, ha_dist):
-        self.timestamp = self.telescope_status['lst'] # hours
-        self.haBar.setMaximum(int(ha_dist/15 * 60)) # convert to minutes and round off, cuz the bar doesn't do decimals
-        self.setValue(0)
+    def update_ha_progress_bar(self, current_time_remaining):
+        """Set the HA progress bar's value, which decreases over time"""
+        self.haBar.setValue(int(current_time_remaining))
 
     def stop_clicked(self):
-        """Informs KoepelX and tries to stop other threads"""
+        """
+        Informs KoepelX and tries to stop other threads, and if
+        the dome is tracking the telescope: stop the tracking.
+        """
         try:
             if self.thread.isRunning():
                 if  hasattr(self.thread, 'is_tracking'):
@@ -778,7 +736,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._log_message(format_koepel_response(msg))
 
     def goto_clicked(self):
-        """Go to azimuth (deg) input via azEdit"""
+        """Move the dome to a specific azimuth (deg), input via azEdit"""
         try:
             # Stop tracking when trying to position the dome manually
             if self.thread.isRunning() and hasattr(self.thread, 'is_tracking'):
@@ -797,7 +755,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.azEdit.setText('')
 
     def plus_5_clicked(self):
-        """Move the azimuth by +5 deg"""
+        """Move the dome azimuth by +5 deg"""
         try:
             # Stop tracking when trying to position the dome manually
             if self.thread.isRunning() and hasattr(self.thread, 'is_tracking'):
@@ -810,7 +768,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._log_message(format_koepel_response(msg))
 
     def min_5_clicked(self):
-        """Move the azimuth by -5 deg"""
+        """Move the dome azimuth by -5 deg"""
         try:
             # Stop tracking when trying to position the dome manually
             if self.thread.isRunning() and hasattr(self.thread, 'is_tracking'):
@@ -824,8 +782,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def on_aperture_changed(self):
         """
-        Ran when the aperture selection combobox 
-        state is changed.
+        Run when the aperture selection combobox state is changed 
+        and signal the tracking thread if it's running.
         """
         target_aperture = self._get_tracking_state()
 

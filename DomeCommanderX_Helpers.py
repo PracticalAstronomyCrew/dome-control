@@ -157,7 +157,7 @@ def get_telescope_position(ha, dec):
     H_12 = rot_x(90-LAT) @ rot_z(-ha) @ transform(0, 0, 0.35)
     H_23 = rot_x(dec) @ transform(-0.14, 0, 0)
 
-    H = H_01 @ H_12 @ H_23 @ rot_z(180) @ rot_y(180)
+    H = rot_z(180) @ H_01 @ H_12 @ H_23
 
     H_unit = transform(0, 1, 0)
 
